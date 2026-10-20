@@ -1,0 +1,9 @@
+# Godot 4+ specific ignores
+.godot/
+build/
+*.apk
+*.aab
+*.tpz
+*.tmp
+*.log
+*.exe
