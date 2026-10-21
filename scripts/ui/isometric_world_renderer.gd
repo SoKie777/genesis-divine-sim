@@ -133,8 +133,8 @@ func center_camera_on_world() -> void:
 		var rect_size: Vector2 = get_viewport_rect().size
 		if rect_size.x > 10.0:
 			vp_size = rect_size
-	var mid_iso: Vector2 = _grid_to_iso_raw(int(state.width / 2), int(state.height / 2), 0.0)
-	camera_offset = vp_size * 0.5 - mid_iso * camera_zoom + Vector2(-60.0, 10.0)
+	var mid_iso: Vector2 = _grid_to_iso_raw(float(state.width) * 0.5, float(state.height) * 0.5, 0.0)
+	camera_offset = vp_size * 0.5 - mid_iso * camera_zoom + Vector2(0.0, -15.0)
 	_dirty = true
 
 
@@ -234,14 +234,14 @@ func _input(event: InputEvent) -> void:
 				_pan_drag_distance = 0.0
 			else:
 				_is_panning = false
-				if mb.button_index == MOUSE_BUTTON_RIGHT and _pan_drag_distance < 8.0:
+				if mb.button_index == MOUSE_BUTTON_RIGHT and _pan_drag_distance < 6.0:
 					right_click_cancel.emit()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
 				_is_left_down = true
 				_left_down_pos = mb.position
 				_left_drag_distance = 0.0
-				if not is_observe_mode and _touches.size() < 2 and not Input.is_key_pressed(KEY_SPACE):
+				if not is_observe_mode and not Input.is_key_pressed(KEY_SPACE):
 					var coord: Vector2i = screen_to_grid(mb.position)
 					if state.is_valid_coord(coord.x, coord.y):
 						selected_tile = coord
@@ -249,8 +249,8 @@ func _input(event: InputEvent) -> void:
 						_dirty = true
 						tile_clicked.emit(coord.x, coord.y, MOUSE_BUTTON_LEFT)
 			else:
-				if _is_left_down and is_observe_mode and _left_drag_distance < 14.0 and _touches.size() < 2:
-					var coord2: Vector2i = screen_to_grid(mb.position)
+				if _is_left_down and is_observe_mode and _left_drag_distance < 8.0:
+					var coord2: Vector2i = screen_to_grid(_left_down_pos)
 					if state.is_valid_coord(coord2.x, coord2.y):
 						selected_tile = coord2
 						_dirty = true
@@ -262,11 +262,17 @@ func _input(event: InputEvent) -> void:
 		var mm: InputEventMouseMotion = event
 		if _touches.size() >= 2:
 			return
-		if _is_panning or (_is_left_down and (is_observe_mode or Input.is_key_pressed(KEY_SPACE))):
+		if _is_panning:
 			camera_offset += mm.relative
 			_pan_drag_distance += mm.relative.length()
-			_left_drag_distance += mm.relative.length()
 			_dirty = true
+			return
+
+		if _is_left_down and (is_observe_mode or Input.is_key_pressed(KEY_SPACE)):
+			_left_drag_distance += mm.relative.length()
+			if _left_drag_distance >= 6.0:
+				camera_offset += mm.relative
+				_dirty = true
 			return
 
 		if _is_over_ui(mm.position) and not _is_left_down:
@@ -617,7 +623,7 @@ func _draw_tile_details(tile: Dictionary, center: Vector2, hw: float, hh: float)
 			draw_circle(center + Vector2(-hw * 0.2, -hh * 0.15), 5.0 * camera_zoom, Color(0.14, 0.42, 0.18))
 
 	var min_type: String = String(tile.get("mineral_type", "NONE"))
-	if min_type != "NONE" and float(tile.get("mineral_reserve", 0.0)) > 10.0 and camera_zoom >= 0.62:
+	if min_type != "NONE" and float(tile.get("mineral_reserve", 0.0)) > 10.0 and (overlay_mode in ["WEALTH", "ELEVATION"] or camera_zoom >= 1.15):
 		var m_col: Color = Color(0.68, 0.70, 0.74)
 		if min_type == "IRON":
 			m_col = Color(0.78, 0.46, 0.32)
@@ -625,7 +631,7 @@ func _draw_tile_details(tile: Dictionary, center: Vector2, hw: float, hh: float)
 			m_col = Color(0.98, 0.84, 0.22)
 		elif min_type == "AETHERIUM":
 			m_col = Color(0.45, 0.92, 0.98)
-		draw_circle(center + Vector2(0.0, hh * 0.22), 3.2 * camera_zoom, m_col)
+		draw_circle(center + Vector2(0.0, hh * 0.22), 3.0 * camera_zoom, m_col)
 
 	if int(tile.get("sacred_site_id", -1)) != -1:
 		if not _draw_sprite_or_fallback("sanctuary", center + Vector2(0.0, -10.0 * camera_zoom), 34.0 * camera_zoom):

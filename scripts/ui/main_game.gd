@@ -440,6 +440,7 @@ func _build_clean_ui() -> void:
 	_nav_panel.offset_top = -124.0
 	_nav_panel.offset_bottom = -12.0
 	_nav_panel.offset_right = 160.0
+	_nav_panel.visible = OS.has_feature("mobile")
 	add_child(_nav_panel)
 
 	var nav_vbox := VBoxContainer.new()
@@ -496,6 +497,7 @@ func _build_clean_ui() -> void:
 	_right_drawer.offset_bottom = -138.0
 	_right_drawer.offset_left = -388.0
 	_right_drawer.offset_right = -10.0
+	_right_drawer.visible = false
 	add_child(_right_drawer)
 
 	var drawer_vbox := VBoxContainer.new()

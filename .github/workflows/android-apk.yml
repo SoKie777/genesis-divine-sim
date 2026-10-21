@@ -101,12 +101,12 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.1
-          name: "GENESIS — The Divine Simulation (v1.0.1 - 60 FPS & Contrôles Tactiles Fluides)"
+          tag_name: v1.0.2
+          name: "GENESIS — The Divine Simulation (v1.0.2 - Ergonomie PC Parfaite & 60 FPS)"
           body: |
-            ## ✦ GENESIS — The Divine Simulation (v1.0.1)
-            Mise à jour majeure de performances et d'ergonomie :
-            - **Fluidité 60 FPS** : Frustum Culling strict, textures Blender optimisées GPU, batching des frontières, throttling UI intelligent.
-            - **Déplacement libre & intuitif** : Glisser à 1 doigt en mode Observer, 2 doigts en tout temps, Clic Droit / Espace + Glisser sur PC, et nouveau pavé tactile directionnel en bas à gauche (`◀ ▲ ▼ ▶` + `🎯 Recentrer`).
+            ## ✦ GENESIS — The Divine Simulation (v1.0.2)
+            Mise à jour majeure d'ergonomie PC & Mobile :
+            - **Expérience PC raffinée** : Élimination du conflit tactile émulé, navigation fluide à la souris (Clic Droit ou Glisser pour naviguer, clic instantané pour inspecter), monde parfaitement centré.
+            - **Interface aérée** : Registre d'omniscience rétractable par défaut pour libérer 95%+ de l'écran, suppression des artéfacts visuels sur le terrain.
             - **Téléchargement Android** : Téléchargez et installez **`genesis-divine-sim.apk`** ci-dessous sur votre smartphone ou tablette.
           files: build/android/genesis-divine-sim.apk
