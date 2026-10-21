@@ -21,6 +21,7 @@ var inspected_religion_id: int = -1
 var inspected_individual_id: int = -1
 
 # Barre supérieure
+var _top_bar: PanelContainer
 var _lbl_world_title: Label
 var _lbl_date_era: Label
 var _btn_pill_pop: Button
@@ -32,6 +33,8 @@ var _opt_overlay: OptionButton
 var _btn_toggle_drawer: Button
 
 # Dock inférieur & sous-barre contextuelle de pouvoirs
+var _dock_panel: PanelContainer
+var _nav_panel: PanelContainer
 var _subbar_panel: PanelContainer
 var _power_buttons_hbox: HBoxContainer
 var _lbl_active_power_hint: Label
@@ -40,6 +43,8 @@ var _lbl_radius_val: Label
 var _slider_intensity: HSlider
 var _lbl_intensity_val: Label
 var _category_buttons: Dictionary = {}
+var _last_prayers_signature: String = ""
+var _last_selectors_signature: String = ""
 
 # Tiroir latéral droit escamotable
 var _right_drawer: PanelContainer
@@ -80,6 +85,7 @@ const DOCK_CATEGORIES: Array[Dictionary] = [
 
 
 func _ready() -> void:
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sim = WorldSimulation.new()
 	sim.initialize_new_world({
 		"world_name": "Aethelgard",
@@ -94,6 +100,7 @@ func _ready() -> void:
 
 	_build_clean_ui()
 	renderer.state = sim.state
+	renderer.is_point_over_ui_callback = _is_pos_over_ui
 	renderer.center_camera_on_world()
 
 	if not sim.state.settlements.is_empty():
@@ -106,18 +113,36 @@ func _ready() -> void:
 	_refresh_all_ui()
 
 
+func _is_pos_over_ui(pos: Vector2) -> bool:
+	if _modal_help != null and _modal_help.visible and _modal_help.get_global_rect().has_point(pos):
+		return true
+	if _modal_genesis != null and _modal_genesis.visible and _modal_genesis.get_global_rect().has_point(pos):
+		return true
+	if _modal_laws != null and _modal_laws.visible and _modal_laws.get_global_rect().has_point(pos):
+		return true
+	if _right_drawer != null and _right_drawer.visible and _right_drawer.get_global_rect().has_point(pos):
+		return true
+	if _top_bar != null and _top_bar.visible and _top_bar.get_global_rect().has_point(pos):
+		return true
+	if _subbar_panel != null and _subbar_panel.visible and _subbar_panel.get_global_rect().has_point(pos):
+		return true
+	if _dock_panel != null and _dock_panel.visible and _dock_panel.get_global_rect().has_point(pos):
+		return true
+	if _nav_panel != null and _nav_panel.visible and _nav_panel.get_global_rect().has_point(pos):
+		return true
+	return false
+
+
 func _process(delta: float) -> void:
 	var ticks_ran: int = sim.update_frame(delta)
+	if ticks_ran > 0:
+		renderer.request_redraw()
 	_ui_refresh_timer += delta
-	if ticks_ran > 0 or _ui_refresh_timer >= 0.35:
+	if ticks_ran > 0 or _ui_refresh_timer >= 0.40:
 		_ui_refresh_timer = 0.0
 		_refresh_top_bar()
-		if _right_drawer.visible:
-			_refresh_inspector_selectors()
-			_refresh_inspector_panel()
-			_refresh_prayers_panel()
-			_refresh_chronicles_panel()
-			_refresh_diagnostics_panel()
+		if _right_drawer != null and _right_drawer.visible:
+			_refresh_active_drawer_tab()
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -159,17 +184,17 @@ func _build_clean_ui() -> void:
 	renderer.right_click_cancel.connect(func() -> void: _select_dock_category("OBSERVATION"))
 
 	# 2. Barre supérieure épurée (Une seule ligne fluide de 54px)
-	var top_bar := _create_styled_panel(Color(0.06, 0.09, 0.15, 0.92), Color(0.88, 0.72, 0.34, 0.55), 8)
-	top_bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	top_bar.offset_left = 10.0
-	top_bar.offset_right = -10.0
-	top_bar.offset_top = 8.0
-	top_bar.offset_bottom = 60.0
-	add_child(top_bar)
+	_top_bar = _create_styled_panel(Color(0.06, 0.09, 0.15, 0.92), Color(0.88, 0.72, 0.34, 0.55), 8)
+	_top_bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	_top_bar.offset_left = 10.0
+	_top_bar.offset_right = -10.0
+	_top_bar.offset_top = 8.0
+	_top_bar.offset_bottom = 60.0
+	add_child(_top_bar)
 
 	var top_hbox := HBoxContainer.new()
 	top_hbox.add_theme_constant_override("separation", 6)
-	top_bar.add_child(top_hbox)
+	_top_bar.add_child(top_hbox)
 
 	_lbl_world_title = Label.new()
 	_lbl_world_title.text = "✦ GENESIS"
@@ -298,6 +323,7 @@ func _build_clean_ui() -> void:
 
 	# 3. Dock Divin Inférieur Centré (Clair, Lisible, Non Encombrant)
 	var bottom_dock_wrap := VBoxContainer.new()
+	bottom_dock_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bottom_dock_wrap.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
 	bottom_dock_wrap.offset_left = -490.0
 	bottom_dock_wrap.offset_right = 490.0
@@ -374,13 +400,13 @@ func _build_clean_ui() -> void:
 	)
 
 	# Barre principale des 6 grands domaines
-	var dock_panel := _create_styled_panel(Color(0.06, 0.09, 0.15, 0.95), Color(0.92, 0.76, 0.36, 0.72), 10)
-	bottom_dock_wrap.add_child(dock_panel)
+	_dock_panel = _create_styled_panel(Color(0.06, 0.09, 0.15, 0.95), Color(0.92, 0.76, 0.36, 0.72), 10)
+	bottom_dock_wrap.add_child(_dock_panel)
 
 	var dock_hbox := HBoxContainer.new()
 	dock_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
 	dock_hbox.add_theme_constant_override("separation", 10)
-	dock_panel.add_child(dock_hbox)
+	_dock_panel.add_child(dock_hbox)
 
 	for cat in DOCK_CATEGORIES:
 		var cid: String = String(cat["id"])
@@ -391,8 +417,9 @@ func _build_clean_ui() -> void:
 		dock_hbox.add_child(btn)
 		_category_buttons[cid] = btn
 
-	# 4. Pilule d'information de survol en haut à gauche sous la barre principale (aucun chevauchement avec le dock du bas)
+	# 4. Pilule d'information de survol en haut à gauche sous la barre principale
 	var hover_panel := _create_styled_panel(Color(0.06, 0.09, 0.15, 0.88), Color(0.38, 0.62, 0.85, 0.45), 6)
+	hover_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	hover_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	hover_panel.offset_left = 10.0
 	hover_panel.offset_top = 66.0
@@ -401,10 +428,66 @@ func _build_clean_ui() -> void:
 	add_child(hover_panel)
 
 	_lbl_hover_pill = Label.new()
-	_lbl_hover_pill.text = "Survolez ou cliquez sur le monde • Clic Droit + Glisser : Caméra • Molette : Zoom"
+	_lbl_hover_pill.text = "Survolez ou cliquez sur le monde • Glisser/Tactile/Flèches : Caméra • Molette : Zoom"
 	_lbl_hover_pill.add_theme_font_size_override("font_size", 12)
 	_lbl_hover_pill.add_theme_color_override("font_color", Color(0.86, 0.92, 0.98))
 	hover_panel.add_child(_lbl_hover_pill)
+
+	# 4b. Commandes de Navigation Caméra directes (Tactile & Clavier)
+	_nav_panel = _create_styled_panel(Color(0.06, 0.09, 0.15, 0.88), Color(0.48, 0.72, 0.95, 0.55), 8)
+	_nav_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_nav_panel.offset_left = 12.0
+	_nav_panel.offset_top = -124.0
+	_nav_panel.offset_bottom = -12.0
+	_nav_panel.offset_right = 160.0
+	add_child(_nav_panel)
+
+	var nav_vbox := VBoxContainer.new()
+	nav_vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_vbox.add_theme_constant_override("separation", 2)
+	_nav_panel.add_child(nav_vbox)
+
+	var nav_top := HBoxContainer.new()
+	nav_top.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_vbox.add_child(nav_top)
+	var btn_up := Button.new()
+	btn_up.text = "▲"
+	btn_up.custom_minimum_size = Vector2(34.0, 28.0)
+	btn_up.pressed.connect(func() -> void: renderer.pan_by_screen_delta(Vector2(0, 90)))
+	nav_top.add_child(btn_up)
+
+	var nav_mid := HBoxContainer.new()
+	nav_mid.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_mid.add_theme_constant_override("separation", 4)
+	nav_vbox.add_child(nav_mid)
+
+	var btn_left := Button.new()
+	btn_left.text = "◀"
+	btn_left.custom_minimum_size = Vector2(34.0, 28.0)
+	btn_left.pressed.connect(func() -> void: renderer.pan_by_screen_delta(Vector2(90, 0)))
+	nav_mid.add_child(btn_left)
+
+	var btn_center := Button.new()
+	btn_center.text = "🎯"
+	btn_center.tooltip_text = "Recentrer la caméra sur le monde"
+	btn_center.custom_minimum_size = Vector2(34.0, 28.0)
+	btn_center.pressed.connect(func() -> void: renderer.center_camera_on_world())
+	nav_mid.add_child(btn_center)
+
+	var btn_right := Button.new()
+	btn_right.text = "▶"
+	btn_right.custom_minimum_size = Vector2(34.0, 28.0)
+	btn_right.pressed.connect(func() -> void: renderer.pan_by_screen_delta(Vector2(-90, 0)))
+	nav_mid.add_child(btn_right)
+
+	var nav_bot := HBoxContainer.new()
+	nav_bot.alignment = BoxContainer.ALIGNMENT_CENTER
+	nav_vbox.add_child(nav_bot)
+	var btn_down := Button.new()
+	btn_down.text = "▼"
+	btn_down.custom_minimum_size = Vector2(34.0, 28.0)
+	btn_down.pressed.connect(func() -> void: renderer.pan_by_screen_delta(Vector2(0, -90)))
+	nav_bot.add_child(btn_down)
 
 	# 5. Tiroir Latéral Droit Escamotable (380px, clair et aéré, ne chevauche jamais le dock inférieur)
 	_right_drawer = _create_styled_panel(Color(0.06, 0.09, 0.15, 0.94), Color(0.48, 0.68, 0.92, 0.58), 10)
@@ -569,6 +652,7 @@ func _build_clean_ui() -> void:
 	_rtl_diagnostics.bbcode_enabled = true
 	_rtl_diagnostics.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	tab_diag.add_child(_rtl_diagnostics)
+	_drawer_tabs.tab_changed.connect(func(_tab: int) -> void: _refresh_active_drawer_tab())
 
 	# 6. Modales (Genèse, Lois de la Nature, Guide de Prise en Main)
 	_build_genesis_modal()
@@ -584,7 +668,7 @@ func _build_help_modal() -> void:
 	_modal_help.offset_right = 270.0
 	_modal_help.offset_top = -180.0
 	_modal_help.offset_bottom = 180.0
-	_modal_help.visible = true # Affiché à l'ouverture pour une prise en main immédiate, fermable en 1 clic
+	_modal_help.visible = false # Accessible à tout moment via le bouton '?'
 	add_child(_modal_help)
 
 	var vb := VBoxContainer.new()
@@ -921,12 +1005,23 @@ func _on_world_tile_hovered(x: int, y: int) -> void:
 
 func _refresh_all_ui() -> void:
 	_refresh_top_bar()
-	if _right_drawer.visible:
-		_refresh_inspector_selectors()
-		_refresh_inspector_panel()
-		_refresh_prayers_panel()
-		_refresh_chronicles_panel()
-		_refresh_diagnostics_panel()
+	if _right_drawer != null and _right_drawer.visible:
+		_refresh_active_drawer_tab()
+
+
+func _refresh_active_drawer_tab() -> void:
+	if _drawer_tabs == null:
+		return
+	match _drawer_tabs.current_tab:
+		0:
+			_refresh_inspector_selectors()
+			_refresh_inspector_panel()
+		1:
+			_refresh_prayers_panel()
+		2:
+			_refresh_chronicles_panel()
+		3:
+			_refresh_diagnostics_panel()
 
 
 func _refresh_top_bar() -> void:
@@ -946,6 +1041,13 @@ func _refresh_top_bar() -> void:
 
 
 func _refresh_inspector_selectors() -> void:
+	if _opt_inspect_civ == null or _opt_inspect_rel == null or _opt_inspect_ind == null:
+		return
+	var sig: String = "%d_%d_%d" % [sim.state.civilizations.size(), sim.state.religions.size(), sim.state.individuals.size()]
+	if sig == _last_selectors_signature and _opt_inspect_civ.item_count > 0:
+		return
+	_last_selectors_signature = sig
+
 	_opt_inspect_civ.clear()
 	var civ_idx: int = 0
 	for c_id in sim.state.civilizations.keys():
@@ -987,6 +1089,8 @@ func _refresh_inspector_selectors() -> void:
 
 
 func _refresh_inspector_panel() -> void:
+	if _rtl_inspector == null:
+		return
 	var lines: PackedStringArray = PackedStringArray()
 
 	var tile: Dictionary = sim.state.get_tile(inspected_tile.x, inspected_tile.y)
@@ -1059,6 +1163,15 @@ func _refresh_inspector_panel() -> void:
 
 
 func _refresh_prayers_panel() -> void:
+	var current_sig: String = ""
+	for p_id in sim.state.prayers.keys():
+		var p: Dictionary = sim.state.prayers[p_id]
+		if String(p.get("status", "")) == "PENDING":
+			current_sig += "%d;" % int(p_id)
+	if current_sig == _last_prayers_signature and _prayers_vbox.get_child_count() > 0:
+		return
+	_last_prayers_signature = current_sig
+
 	for child in _prayers_vbox.get_children():
 		child.queue_free()
 
@@ -1159,6 +1272,8 @@ func _refresh_chronicles_panel() -> void:
 
 
 func _refresh_diagnostics_panel() -> void:
+	if _drawer_tabs != null and _drawer_tabs.current_tab != 3:
+		return
 	var lines: PackedStringArray = PackedStringArray()
 	var inv: Dictionary = sim.verify_world_invariants()
 	if bool(inv["ok"]):

@@ -1,8 +1,12 @@
 class_name IsometricWorldRenderer
 extends Node2D
-## Moteur de rendu 2.5D isométrique hybride (Prismes 2.5D + Sprites 3D Blender + Couches Analytiques).
-## Lit WorldState et affiche le relief, l'eau animée, la biomasse, les cités 3D Blender,
-## les caravanes marchandes, les portails cosmologiques, les entités spirituelles et les armées.
+## Moteur de rendu 2.5D isométrique haute performance (60 FPS PC & Android).
+## Optimisations majeures :
+## - Frustum Culling strict (seules les tuiles visibles à l'écran sont dessinées).
+## - Zéro allocation mémoire par tuile (tableaux PackedVector2Array pré-alloués et réutilisés).
+## - Textures 3D Blender redimensionnées en cache GPU (64x64 / 96x96) au chargement.
+## - Frontières politiques fusionnées en 1 seul appel draw_multiline par civilisation (uniquement sur les bords réels).
+## - Entrées souris & multi-touch Android prioritaires via _input() avec détection UI précise.
 
 signal tile_clicked(x: int, y: int, button_index: int)
 signal tile_hovered(x: int, y: int)
@@ -20,49 +24,105 @@ var selected_tile: Vector2i = Vector2i(-1, -1)
 var brush_radius: int = 2
 var show_borders: bool = true
 var show_trade_routes: bool = true
-var overlay_mode: String = "BIOME"
+var overlay_mode: String = "BIOME":
+	set(v):
+		overlay_mode = v
+		_dirty = true
+
+var is_observe_mode: bool = true
+var is_point_over_ui_callback: Callable = Callable()
+var external_pan_dir: Vector2 = Vector2.ZERO
 
 var _anim_time: float = 0.0
+var _anim_redraw_accum: float = 0.0
+var _dirty: bool = true
+
 var _is_panning: bool = false
 var _pan_drag_distance: float = 0.0
 var _is_left_down: bool = false
 var _left_down_pos: Vector2 = Vector2.ZERO
 var _left_drag_distance: float = 0.0
 var _last_painted_tile: Vector2i = Vector2i(-1, -1)
-var is_observe_mode: bool = true
 
-# Support Multi-Touch Android (Pinch-to-Zoom & Pan à 2 doigts)
+# Support Multi-Touch Android (Pinch-to-Zoom & Pan fluide)
 var _touches: Dictionary = {}
 var _last_pinch_dist: float = 0.0
 
-# Textures 3D isométriques générées via Blender 5.2
+# Textures 3D isométriques générées via Blender 5.2 (optimisées en résolution pour GPU mobile/PC)
 var _blender_textures: Dictionary = {}
+
+# Tableaux pré-alloués pour éviter toute allocation mémoire dans la boucle _draw()
+var _poly_top: PackedVector2Array = PackedVector2Array()
+var _poly_left: PackedVector2Array = PackedVector2Array()
+var _poly_right: PackedVector2Array = PackedVector2Array()
+var _poly_outline: PackedVector2Array = PackedVector2Array()
 
 
 func _ready() -> void:
+	_poly_top.resize(4)
+	_poly_left.resize(4)
+	_poly_right.resize(4)
+	_poly_outline.resize(5)
 	_load_blender_sprites()
 
 
+func request_redraw() -> void:
+	_dirty = true
+	queue_redraw()
+
+
 func _load_blender_sprites() -> void:
-	var sprite_names: Array[String] = ["village", "city", "sanctuary", "portal", "spirit", "army", "ruin", "tree_forest"]
-	for s_name in sprite_names:
+	var sprite_Target_sizes: Dictionary = {
+		"village": 88,
+		"city": 96,
+		"sanctuary": 96,
+		"portal": 88,
+		"spirit": 64,
+		"army": 64,
+		"ruin": 64,
+		"tree_forest": 56
+	}
+	for s_name in sprite_Target_sizes.keys():
+		var target_px: int = int(sprite_Target_sizes[s_name])
 		var res_path: String = "res://assets/sprites/%s.png" % s_name
+		var img: Image = null
+
 		if ResourceLoader.exists(res_path):
-			var loaded_tex: Resource = load(res_path)
-			if loaded_tex is Texture2D:
-				_blender_textures[s_name] = loaded_tex
-				continue
-		var abs_path: String = ProjectSettings.globalize_path(res_path)
-		if FileAccess.file_exists(abs_path):
-			var img := Image.load_from_file(abs_path)
-			if img != null and not img.is_empty():
-				_blender_textures[s_name] = ImageTexture.create_from_image(img)
+			var loaded_res: Resource = load(res_path)
+			if loaded_res is Texture2D:
+				img = (loaded_res as Texture2D).get_image()
+
+		if img == null:
+			var abs_path: String = ProjectSettings.globalize_path(res_path)
+			if FileAccess.file_exists(abs_path):
+				img = Image.load_from_file(abs_path)
+
+		if img != null and not img.is_empty():
+			if img.get_width() > target_px:
+				img.resize(target_px, target_px, Image.INTERPOLATE_BILINEAR)
+			_blender_textures[s_name] = ImageTexture.create_from_image(img)
 
 
 func _process(delta: float) -> void:
 	_anim_time += delta
-	_handle_keyboard_pan(delta)
-	queue_redraw()
+	if _handle_keyboard_pan(delta):
+		_dirty = true
+
+	# Animation légère uniquement si des effets éphémères ou caravanes sont présents (15 Hz max au repos)
+	var has_active_fx: bool = state != null and (
+		not state.visual_pulses.is_empty()
+		or not state.floating_texts.is_empty()
+		or not state.caravans.is_empty()
+	)
+	if has_active_fx:
+		_anim_redraw_accum += delta
+		if _anim_redraw_accum >= 0.065:
+			_anim_redraw_accum = 0.0
+			_dirty = true
+
+	if _dirty:
+		_dirty = false
+		queue_redraw()
 
 
 func center_camera_on_world() -> void:
@@ -74,7 +134,8 @@ func center_camera_on_world() -> void:
 		if rect_size.x > 10.0:
 			vp_size = rect_size
 	var mid_iso: Vector2 = _grid_to_iso_raw(int(state.width / 2), int(state.height / 2), 0.0)
-	camera_offset = vp_size * 0.5 - mid_iso * camera_zoom + Vector2(-80.0, 10.0)
+	camera_offset = vp_size * 0.5 - mid_iso * camera_zoom + Vector2(-60.0, 10.0)
+	_dirty = true
 
 
 func center_on_tile(tx: int, ty: int) -> void:
@@ -89,10 +150,16 @@ func center_on_tile(tx: int, ty: int) -> void:
 	var elev: float = maxf(0.0, float(t.get("elevation", 0.0)))
 	var iso: Vector2 = _grid_to_iso_raw(tx, ty, elev)
 	camera_offset = vp_size * 0.5 - iso * camera_zoom
+	_dirty = true
 
 
-func _handle_keyboard_pan(delta: float) -> void:
-	var dir := Vector2.ZERO
+func pan_by_screen_delta(delta_px: Vector2) -> void:
+	camera_offset += delta_px
+	_dirty = true
+
+
+func _handle_keyboard_pan(delta: float) -> bool:
+	var dir := external_pan_dir
 	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_LEFT):
 		dir.x += 1.0
 	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
@@ -102,17 +169,27 @@ func _handle_keyboard_pan(delta: float) -> void:
 	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
 		dir.y -= 1.0
 	if dir != Vector2.ZERO:
-		camera_offset += dir.normalized() * 560.0 * delta
+		camera_offset += dir.normalized() * 680.0 * delta
+		return true
+	return false
 
 
-func _unhandled_input(event: InputEvent) -> void:
+func _is_over_ui(pos: Vector2) -> bool:
+	if is_point_over_ui_callback.is_valid():
+		return bool(is_point_over_ui_callback.call(pos))
+	return false
+
+
+func _input(event: InputEvent) -> void:
 	if state == null:
 		return
 
-	# 1. Gestes Multi-Touch natifs Android (Pinch-to-Zoom à 2 doigts)
+	# 1. Gestes Multi-Touch natifs Android (Pinch-to-Zoom & Pan à 2 doigts dans tous les modes)
 	if event is InputEventScreenTouch:
 		var st_ev: InputEventScreenTouch = event
 		if st_ev.pressed:
+			if _is_over_ui(st_ev.position):
+				return
 			_touches[st_ev.index] = st_ev.position
 			if _touches.size() == 2:
 				var pts: Array = _touches.values()
@@ -124,6 +201,8 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	elif event is InputEventScreenDrag:
 		var sd_ev: InputEventScreenDrag = event
+		if not _touches.has(sd_ev.index) and _is_over_ui(sd_ev.position):
+			return
 		_touches[sd_ev.index] = sd_ev.position
 		if _touches.size() >= 2:
 			var pts: Array = _touches.values()
@@ -131,44 +210,50 @@ func _unhandled_input(event: InputEvent) -> void:
 			var p1 := Vector2(pts[1])
 			var new_dist: float = p0.distance_to(p1)
 			var mid: Vector2 = (p0 + p1) * 0.5
-			if _last_pinch_dist > 10.0 and new_dist > 10.0:
-				var factor: float = clampf(new_dist / _last_pinch_dist, 0.85, 1.18)
+			if _last_pinch_dist > 12.0 and new_dist > 12.0:
+				var factor: float = clampf(new_dist / _last_pinch_dist, 0.88, 1.14)
 				_zoom_at_point(factor, mid)
 			_last_pinch_dist = new_dist
-			camera_offset += sd_ev.relative * 0.5
+			camera_offset += sd_ev.relative * 0.55
+			_dirty = true
 			return
 
-	# 2. Souris & Touch émulé (1 doigt : Glisser pour déplacer en mode Observer, ou Peindre en mode Pouvoir)
+	# 2. Souris & Touch émulé (1 doigt / Clic gauche, Clic droit, Molette)
 	if event is InputEventMouseButton:
 		var mb: InputEventMouseButton = event
+		if mb.pressed and _is_over_ui(mb.position):
+			return
+
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
-			_zoom_at_point(1.12, mb.position)
+			_zoom_at_point(1.14, mb.position)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
-			_zoom_at_point(1.0 / 1.12, mb.position)
+			_zoom_at_point(1.0 / 1.14, mb.position)
 		elif mb.button_index in [MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE]:
 			if mb.pressed:
 				_is_panning = true
 				_pan_drag_distance = 0.0
 			else:
 				_is_panning = false
-				if mb.button_index == MOUSE_BUTTON_RIGHT and _pan_drag_distance < 6.0:
+				if mb.button_index == MOUSE_BUTTON_RIGHT and _pan_drag_distance < 8.0:
 					right_click_cancel.emit()
 		elif mb.button_index == MOUSE_BUTTON_LEFT:
 			if mb.pressed:
 				_is_left_down = true
 				_left_down_pos = mb.position
 				_left_drag_distance = 0.0
-				if not is_observe_mode and _touches.size() < 2:
+				if not is_observe_mode and _touches.size() < 2 and not Input.is_key_pressed(KEY_SPACE):
 					var coord: Vector2i = screen_to_grid(mb.position)
 					if state.is_valid_coord(coord.x, coord.y):
 						selected_tile = coord
 						_last_painted_tile = coord
+						_dirty = true
 						tile_clicked.emit(coord.x, coord.y, MOUSE_BUTTON_LEFT)
 			else:
-				if _is_left_down and is_observe_mode and _left_drag_distance < 12.0 and _touches.size() < 2:
+				if _is_left_down and is_observe_mode and _left_drag_distance < 14.0 and _touches.size() < 2:
 					var coord2: Vector2i = screen_to_grid(mb.position)
 					if state.is_valid_coord(coord2.x, coord2.y):
 						selected_tile = coord2
+						_dirty = true
 						tile_clicked.emit(coord2.x, coord2.y, MOUSE_BUTTON_LEFT)
 				_is_left_down = false
 				_last_painted_tile = Vector2i(-1, -1)
@@ -177,16 +262,20 @@ func _unhandled_input(event: InputEvent) -> void:
 		var mm: InputEventMouseMotion = event
 		if _touches.size() >= 2:
 			return
-		if _is_panning:
+		if _is_panning or (_is_left_down and (is_observe_mode or Input.is_key_pressed(KEY_SPACE))):
 			camera_offset += mm.relative
 			_pan_drag_distance += mm.relative.length()
-		elif _is_left_down and is_observe_mode:
-			camera_offset += mm.relative
 			_left_drag_distance += mm.relative.length()
+			_dirty = true
+			return
+
+		if _is_over_ui(mm.position) and not _is_left_down:
+			return
 
 		var coord: Vector2i = screen_to_grid(mm.position)
 		if coord != hovered_tile:
 			hovered_tile = coord
+			_dirty = true
 			if state.is_valid_coord(coord.x, coord.y):
 				tile_hovered.emit(coord.x, coord.y)
 				if _is_left_down and not is_observe_mode and coord != _last_painted_tile:
@@ -196,9 +285,10 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _zoom_at_point(factor: float, screen_pos: Vector2) -> void:
 	var old_zoom: float = camera_zoom
-	camera_zoom = clampf(camera_zoom * factor, 0.38, 2.5)
+	camera_zoom = clampf(camera_zoom * factor, 0.36, 2.4)
 	var ratio: float = camera_zoom / old_zoom
 	camera_offset = screen_pos - (screen_pos - camera_offset) * ratio
+	_dirty = true
 
 
 func _grid_to_iso_raw(gx: float, gy: float, elev: float = 0.0) -> Vector2:
@@ -222,66 +312,120 @@ func _draw() -> void:
 	if state == null or state.tiles.is_empty():
 		return
 
+	var vp_size: Vector2 = get_viewport_rect().size
+	if vp_size.x < 10.0:
+		vp_size = Vector2(1600.0, 950.0)
+
 	var hw: float = (TILE_W * 0.5) * camera_zoom
 	var hh: float = (TILE_H * 0.5) * camera_zoom
+	var elev_px: float = ELEV_SCALE * camera_zoom
 	var font: Font = ThemeDB.fallback_font
 
-	# 1. Rendu des tuiles 2.5D isométriques dans l'ordre du peintre
-	for y in range(state.height):
-		for x in range(state.width):
-			var tile: Dictionary = state.tiles[y * state.width + x]
+	var min_screen_x: float = -hw * 1.6
+	var max_screen_x: float = vp_size.x + hw * 1.6
+	var min_screen_y: float = -hh * 3.0
+	var max_screen_y: float = vp_size.y + hh * 3.0
+
+	var w: int = state.width
+	var h: int = state.height
+	var tiles_arr: Array = state.tiles
+	var is_biome_mode: bool = (overlay_mode == "BIOME")
+	var draw_rivers: bool = overlay_mode in ["BIOME", "MOISTURE", "FERTILITY"]
+	var draw_skirts: bool = (camera_zoom >= 0.48)
+	var border_batches: Dictionary = {}
+
+	# 1. Rendu ultra-rapide des tuiles visibles (Frustum Culling + Zéro allocation)
+	for y in range(h):
+		var row_offset: int = y * w
+		for x in range(w):
+			var base_x: float = (float(x - y) * (TILE_W * 0.5)) * camera_zoom + camera_offset.x
+			if base_x < min_screen_x or base_x > max_screen_x:
+				continue
+			var base_y: float = (float(x + y) * (TILE_H * 0.5)) * camera_zoom + camera_offset.y
+			if base_y < min_screen_y or base_y > max_screen_y:
+				continue
+
+			var tile: Dictionary = tiles_arr[row_offset + x]
 			var raw_elev: float = float(tile["elevation"])
 			var draw_elev: float = maxf(0.0, raw_elev)
-			if raw_elev < 0.0:
-				draw_elev = sin(_anim_time * 2.2 + float(x) * 0.45 + float(y) * 0.45) * 0.025
-
-			var center: Vector2 = grid_to_screen(float(x), float(y), draw_elev)
-			var base_center: Vector2 = grid_to_screen(float(x), float(y), -0.09)
-
-			var top_pts := PackedVector2Array([
-				center + Vector2(0.0, -hh),
-				center + Vector2(hw, 0.0),
-				center + Vector2(0.0, hh),
-				center + Vector2(-hw, 0.0)
-			])
+			var cx: float = base_x
+			var cy: float = base_y - draw_elev * elev_px
+			var center := Vector2(cx, cy)
 
 			var top_col: Color = _get_tile_color(tile)
 
-			if base_center.y > center.y + 1.0:
-				var left_face := PackedVector2Array([
-					center + Vector2(-hw, 0.0),
-					center + Vector2(0.0, hh),
-					base_center + Vector2(0.0, hh),
-					base_center + Vector2(-hw, 0.0)
-				])
-				var right_face := PackedVector2Array([
-					center + Vector2(0.0, hh),
-					center + Vector2(hw, 0.0),
-					base_center + Vector2(hw, 0.0),
-					base_center + Vector2(0.0, hh)
-				])
-				draw_colored_polygon(left_face, top_col.darkened(0.30))
-				draw_colored_polygon(right_face, top_col.darkened(0.45))
+			# Jupes latérales 2.5D uniquement pour les terres émergées visibles
+			if draw_skirts and raw_elev > 0.01:
+				var by: float = base_y + 0.07 * elev_px
+				if by > cy + 1.0:
+					_poly_left[0] = Vector2(cx - hw, cy)
+					_poly_left[1] = Vector2(cx, cy + hh)
+					_poly_left[2] = Vector2(cx, by + hh)
+					_poly_left[3] = Vector2(cx - hw, by)
+					draw_colored_polygon(_poly_left, top_col.darkened(0.28))
 
-			draw_colored_polygon(top_pts, top_col)
+					_poly_right[0] = Vector2(cx, cy + hh)
+					_poly_right[1] = Vector2(cx + hw, cy)
+					_poly_right[2] = Vector2(cx + hw, by)
+					_poly_right[3] = Vector2(cx, by + hh)
+					draw_colored_polygon(_poly_right, top_col.darkened(0.44))
 
-			# Fleuves animés
-			if bool(tile["has_river"]) and raw_elev >= 0.0 and overlay_mode in ["BIOME", "MOISTURE", "FERTILITY"]:
-				var river_col := Color(0.22, 0.72, 0.98, 0.90)
-				draw_line(center + Vector2(-hw * 0.36, -hh * 0.25), center + Vector2(hw * 0.36, hh * 0.25), river_col, maxf(2.0, 3.4 * camera_zoom))
+			var p_top := Vector2(cx, cy - hh)
+			var p_right := Vector2(cx + hw, cy)
+			var p_bottom := Vector2(cx, cy + hh)
+			var p_left := Vector2(cx - hw, cy)
 
-			# Frontières politiques
-			var owner_id: int = int(tile.get("owner_civ_id", -1))
-			if show_borders and owner_id != -1 and state.civilizations.has(owner_id):
-				var civ_col: Color = state.civilizations[owner_id]["color"]
-				draw_polyline(PackedVector2Array([
-					top_pts[0], top_pts[1], top_pts[2], top_pts[3], top_pts[0]
-				]), Color(civ_col.r, civ_col.g, civ_col.b, 0.40), maxf(1.0, 1.35 * camera_zoom))
+			_poly_top[0] = p_top
+			_poly_top[1] = p_right
+			_poly_top[2] = p_bottom
+			_poly_top[3] = p_left
+			draw_colored_polygon(_poly_top, top_col)
 
-			if overlay_mode == "BIOME":
+			# Fleuves
+			if draw_rivers and bool(tile["has_river"]) and raw_elev >= 0.0:
+				draw_line(
+					Vector2(cx - hw * 0.35, cy - hh * 0.24),
+					Vector2(cx + hw * 0.35, cy + hh * 0.24),
+					Color(0.22, 0.72, 0.98, 0.90),
+					maxf(1.8, 3.0 * camera_zoom)
+				)
+
+			# Collecte des frontières uniquement sur les bords extérieurs du territoire (batché par civilisation)
+			if show_borders:
+				var owner_id: int = int(tile.get("owner_civ_id", -1))
+				if owner_id != -1 and state.civilizations.has(owner_id):
+					if not border_batches.has(owner_id):
+						border_batches[owner_id] = PackedVector2Array()
+					var b_pts: PackedVector2Array = border_batches[owner_id]
+					# Bord Nord-Est (y - 1)
+					if y == 0 or int(tiles_arr[(y - 1) * w + x].get("owner_civ_id", -1)) != owner_id:
+						b_pts.append(p_top)
+						b_pts.append(p_right)
+					# Bord Sud-Est (x + 1)
+					if x == w - 1 or int(tiles_arr[row_offset + x + 1].get("owner_civ_id", -1)) != owner_id:
+						b_pts.append(p_right)
+						b_pts.append(p_bottom)
+					# Bord Sud-Ouest (y + 1)
+					if y == h - 1 or int(tiles_arr[(y + 1) * w + x].get("owner_civ_id", -1)) != owner_id:
+						b_pts.append(p_bottom)
+						b_pts.append(p_left)
+					# Bord Nord-Ouest (x - 1)
+					if x == 0 or int(tiles_arr[row_offset + x - 1].get("owner_civ_id", -1)) != owner_id:
+						b_pts.append(p_left)
+						b_pts.append(p_top)
+					border_batches[owner_id] = b_pts
+
+			if is_biome_mode:
 				_draw_tile_details(tile, center, hw, hh)
 
-	# 2. Routes commerciales et caravanes marchandes en mouvement
+	# 1b. Dessin groupé des frontières politiques (1 seul appel draw_multiline par civilisation)
+	for civ_id in border_batches.keys():
+		var pts: PackedVector2Array = border_batches[civ_id]
+		if pts.size() >= 2:
+			var c_col: Color = state.civilizations[civ_id]["color"]
+			draw_multiline(pts, Color(c_col.r, c_col.g, c_col.b, 0.78), maxf(1.5, 2.2 * camera_zoom))
+
+	# 2. Routes commerciales et caravanes marchandes
 	if show_trade_routes:
 		for s_id in state.settlements.keys():
 			var s: Dictionary = state.settlements[s_id]
@@ -300,15 +444,14 @@ func _draw() -> void:
 					var py: int = int(ps["tile_y"])
 					var pt: Dictionary = state.get_tile(px, py)
 					var p2: Vector2 = grid_to_screen(float(px), float(py), maxf(0.0, float(pt.get("elevation", 0.0))))
-					draw_dashed_line(p1, p2, Color(0.98, 0.84, 0.38, 0.45), maxf(1.5, 2.0 * camera_zoom), 6.0 * camera_zoom)
+					draw_dashed_line(p1, p2, Color(0.98, 0.84, 0.38, 0.45), maxf(1.4, 2.0 * camera_zoom), 6.0 * camera_zoom)
 
 		for c in state.caravans:
 			var prog: float = clampf(float(c.get("progress", 0.0)) + fmod(_anim_time * 0.25, 0.25), 0.0, 1.0)
 			var cx: float = lerpf(float(c["x"]), float(c["target_x"]), prog)
 			var cy: float = lerpf(float(c["y"]), float(c["target_y"]), prog)
 			var cpos: Vector2 = grid_to_screen(cx, cy, 0.15)
-			draw_circle(cpos, 4.2 * camera_zoom, Color(1.0, 0.88, 0.32))
-			draw_arc(cpos, 5.2 * camera_zoom, 0.0, TAU, 12, Color(0.15, 0.12, 0.05, 0.9), 1.4 * camera_zoom)
+			draw_circle(cpos, 4.0 * camera_zoom, Color(1.0, 0.88, 0.32))
 
 	# 3. Portails cosmologiques (Sprites 3D Blender)
 	for portal in state.portals:
@@ -344,7 +487,7 @@ func _draw() -> void:
 		var progress: float = 1.0 - clampf(ttl / 1.8, 0.0, 1.0)
 		var col: Color = pulse["color"]
 		var rad: float = (20.0 + progress * 55.0 * float(pulse["radius"])) * camera_zoom
-		draw_arc(pos, rad, 0.0, TAU, 36, Color(col.r, col.g, col.b, clampf(ttl, 0.0, 0.9)), 3.0 * camera_zoom)
+		draw_arc(pos, rad, 0.0, TAU, 24, Color(col.r, col.g, col.b, clampf(ttl, 0.0, 0.9)), 2.6 * camera_zoom)
 		var lbl: String = String(pulse.get("label", ""))
 		if not lbl.is_empty():
 			draw_string_outline(font, pos + Vector2(-45.0, -24.0 - progress * 25.0), lbl, HORIZONTAL_ALIGNMENT_CENTER, -1, 13, 3, Color.BLACK)
@@ -363,18 +506,17 @@ func _draw() -> void:
 		draw_string(font, fpos, String(ft["text"]), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, fcol)
 
 	# 8. Aperçu du pinceau divin et de la sélection
-	if state.is_valid_coord(hovered_tile.x, hovered_tile.y):
+	if not is_observe_mode and state.is_valid_coord(hovered_tile.x, hovered_tile.y):
 		_draw_brush_preview(hovered_tile.x, hovered_tile.y, brush_radius, hw, hh)
 	if state.is_valid_coord(selected_tile.x, selected_tile.y):
 		var st: Dictionary = state.get_tile(selected_tile.x, selected_tile.y)
 		var sc: Vector2 = grid_to_screen(float(selected_tile.x), float(selected_tile.y), maxf(0.0, float(st.get("elevation", 0.0))))
-		draw_polyline(PackedVector2Array([
-			sc + Vector2(0.0, -hh),
-			sc + Vector2(hw, 0.0),
-			sc + Vector2(0.0, hh),
-			sc + Vector2(-hw, 0.0),
-			sc + Vector2(0.0, -hh)
-		]), Color(1.0, 0.92, 0.35, 0.95), 2.8 * camera_zoom)
+		_poly_outline[0] = sc + Vector2(0.0, -hh)
+		_poly_outline[1] = sc + Vector2(hw, 0.0)
+		_poly_outline[2] = sc + Vector2(0.0, hh)
+		_poly_outline[3] = sc + Vector2(-hw, 0.0)
+		_poly_outline[4] = sc + Vector2(0.0, -hh)
+		draw_polyline(_poly_outline, Color(1.0, 0.92, 0.35, 0.95), 2.6 * camera_zoom)
 
 
 func _draw_sprite_or_fallback(sprite_key: String, center_pos: Vector2, size_px: float, modulate_col: Color = Color.WHITE) -> bool:
@@ -457,25 +599,25 @@ func _get_tile_color(tile: Dictionary) -> Color:
 
 
 func _draw_tile_details(tile: Dictionary, center: Vector2, hw: float, hh: float) -> void:
-	if camera_zoom < 0.46:
+	if camera_zoom < 0.52:
+		return
+
+	var s_id: int = int(tile.get("settlement_id", -1))
+	if s_id != -1:
 		return
 
 	var biome: String = String(tile["biome"])
 	var flora: float = float(tile.get("biomass_flora", 0.0))
-	var s_id: int = int(tile.get("settlement_id", -1))
 
-	if s_id == -1 and biome in ["FOREST", "SWAMP", "PLAINS"] and flora >= 35.0:
+	# Arbres 3D Blender uniquement sur les vraies forêts (évite la surcharge GPU et améliore la lisibilité)
+	if biome == "FOREST" and flora >= 40.0:
 		var tree_tint: Color = Color.WHITE if state.season != "Automne" else Color(1.0, 0.78, 0.55)
-		var sprite_sz: float = clampf((flora / 100.0) * 32.0 * camera_zoom, 14.0, 36.0)
-		if not _draw_sprite_or_fallback("tree_forest", center + Vector2(0.0, -6.0 * camera_zoom), sprite_sz, tree_tint):
-			var tree_col: Color = Color(0.14, 0.42, 0.18) if state.season != "Automne" else Color(0.76, 0.44, 0.16)
-			var tree_size: float = clampf((flora / 100.0) * 7.5 * camera_zoom, 2.5, 9.0)
-			draw_circle(center + Vector2(-hw * 0.22, -hh * 0.18), tree_size, tree_col)
-			if flora > 65.0:
-				draw_circle(center + Vector2(hw * 0.20, -hh * 0.08), tree_size * 0.85, tree_col.lightened(0.08))
+		var sprite_sz: float = clampf(26.0 * camera_zoom, 14.0, 32.0)
+		if not _draw_sprite_or_fallback("tree_forest", center + Vector2(0.0, -5.0 * camera_zoom), sprite_sz, tree_tint):
+			draw_circle(center + Vector2(-hw * 0.2, -hh * 0.15), 5.0 * camera_zoom, Color(0.14, 0.42, 0.18))
 
 	var min_type: String = String(tile.get("mineral_type", "NONE"))
-	if s_id == -1 and min_type != "NONE" and float(tile.get("mineral_reserve", 0.0)) > 10.0:
+	if min_type != "NONE" and float(tile.get("mineral_reserve", 0.0)) > 10.0 and camera_zoom >= 0.62:
 		var m_col: Color = Color(0.68, 0.70, 0.74)
 		if min_type == "IRON":
 			m_col = Color(0.78, 0.46, 0.32)
@@ -483,22 +625,11 @@ func _draw_tile_details(tile: Dictionary, center: Vector2, hw: float, hh: float)
 			m_col = Color(0.98, 0.84, 0.22)
 		elif min_type == "AETHERIUM":
 			m_col = Color(0.45, 0.92, 0.98)
-		draw_circle(center + Vector2(0.0, hh * 0.22), 3.4 * camera_zoom, m_col)
+		draw_circle(center + Vector2(0.0, hh * 0.22), 3.2 * camera_zoom, m_col)
 
-	var fauna_cnt: int = int(tile.get("fauna_count", 0))
-	if s_id == -1 and fauna_cnt > 8 and camera_zoom >= 0.62:
-		var f_id: int = int(tile.get("fauna_species_id", -1))
-		var f_col: Color = Color(0.95, 0.88, 0.72)
-		if f_id == 3:
-			f_col = Color(0.55, 0.55, 0.62)
-		elif f_id == 5:
-			f_col = Color(0.55, 0.96, 0.98)
-		var drift_x: float = sin(_anim_time * 1.6 + float(tile["id"])) * 3.0 * camera_zoom
-		draw_circle(center + Vector2(drift_x, 0.0), 2.5 * camera_zoom, f_col)
-
-	if int(tile.get("sacred_site_id", -1)) != -1 and s_id == -1:
-		if not _draw_sprite_or_fallback("sanctuary", center + Vector2(0.0, -10.0 * camera_zoom), 36.0 * camera_zoom):
-			draw_circle(center + Vector2(0.0, -8.0 * camera_zoom), 5.5 * camera_zoom, Color(0.98, 0.90, 0.42, 0.9))
+	if int(tile.get("sacred_site_id", -1)) != -1:
+		if not _draw_sprite_or_fallback("sanctuary", center + Vector2(0.0, -10.0 * camera_zoom), 34.0 * camera_zoom):
+			draw_circle(center + Vector2(0.0, -8.0 * camera_zoom), 5.0 * camera_zoom, Color(0.98, 0.90, 0.42, 0.9))
 
 
 func _draw_settlement(s: Dictionary, hw: float, _hh: float, font: Font) -> void:
@@ -514,13 +645,13 @@ func _draw_settlement(s: Dictionary, hw: float, _hh: float, font: Font) -> void:
 	var civ_col: Color = state.civilizations.get(civ_id, {}).get("color", Color.WHITE)
 
 	if tier == "RUIN":
-		if not _draw_sprite_or_fallback("ruin", center + Vector2(0.0, -8.0 * camera_zoom), 34.0 * camera_zoom):
+		if not _draw_sprite_or_fallback("ruin", center + Vector2(0.0, -8.0 * camera_zoom), 32.0 * camera_zoom):
 			draw_rect(Rect2(center - Vector2(6.0, 6.0) * camera_zoom, Vector2(12.0, 8.0) * camera_zoom), Color(0.42, 0.40, 0.38))
 		return
 
 	var buildings: Array = s.get("buildings", [])
 	if buildings.has("WALLS"):
-		draw_arc(center, hw * 0.62, 0.0, TAU, 24, Color(civ_col.r, civ_col.g, civ_col.b, 0.68), 2.2 * camera_zoom)
+		draw_arc(center, hw * 0.60, 0.0, TAU, 16, Color(civ_col.r, civ_col.g, civ_col.b, 0.68), 2.0 * camera_zoom)
 
 	var sprite_key: String = "village"
 	var sprite_size: float = 38.0 * camera_zoom
@@ -534,15 +665,10 @@ func _draw_settlement(s: Dictionary, hw: float, _hh: float, font: Font) -> void:
 	if not _draw_sprite_or_fallback(sprite_key, center + Vector2(0.0, -10.0 * camera_zoom), sprite_size):
 		var b_size: float = 10.0 * camera_zoom
 		draw_rect(Rect2(center - Vector2(b_size * 0.5, b_size * 0.8), Vector2(b_size, b_size * 0.8)), Color(0.92, 0.88, 0.80))
-		draw_colored_polygon(PackedVector2Array([
-			center + Vector2(-b_size * 0.65, -b_size * 0.8),
-			center + Vector2(0.0, -b_size * 1.45),
-			center + Vector2(b_size * 0.65, -b_size * 0.8)
-		]), civ_col)
 
-	if camera_zoom >= 0.52:
+	if camera_zoom >= 0.48:
 		var badge_text: String = "%s • %d" % [String(s["name"]), int(s["population"])]
-		var label_pos: Vector2 = center + Vector2(-44.0, -sprite_size * 0.65 - 6.0)
+		var label_pos: Vector2 = center + Vector2(-42.0, -sprite_size * 0.62 - 6.0)
 		draw_string_outline(font, label_pos, badge_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0.04, 0.06, 0.10, 0.95))
 		draw_string(font, label_pos, badge_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, civ_col.lightened(0.38))
 
@@ -559,9 +685,8 @@ func _draw_army(army: Dictionary, _hw: float, _hh: float, font: Font) -> void:
 
 	if not _draw_sprite_or_fallback("army", pos, 32.0 * camera_zoom):
 		draw_circle(pos, 7.0 * camera_zoom, civ_col)
-		draw_arc(pos, 7.5 * camera_zoom, 0.0, TAU, 16, Color.WHITE, 1.8 * camera_zoom)
 
-	if camera_zoom >= 0.58:
+	if camera_zoom >= 0.55:
 		var txt: String = "⚔ %d" % int(army["manpower"])
 		draw_string_outline(font, pos + Vector2(-18.0, -14.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 3, Color.BLACK)
 		draw_string(font, pos + Vector2(-18.0, -14.0), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, civ_col.lightened(0.4))
@@ -573,11 +698,10 @@ func _draw_spiritual_entity(ent: Dictionary, _hw: float, _hh: float, _font: Font
 	var tile: Dictionary = state.get_tile(sx, sy)
 	if tile.is_empty():
 		return
-	var float_y: float = sin(_anim_time * 3.0 + float(ent["id"])) * 5.0 * camera_zoom
+	var float_y: float = sin(_anim_time * 3.0 + float(ent["id"])) * 4.0 * camera_zoom
 	var pos: Vector2 = grid_to_screen(float(sx), float(sy), maxf(0.0, float(tile["elevation"]))) + Vector2(0.0, -18.0 * camera_zoom + float_y)
 	if not _draw_sprite_or_fallback("spirit", pos, 34.0 * camera_zoom):
-		draw_circle(pos, 6.5 * camera_zoom, Color(0.52, 0.94, 0.98, 0.45))
-		draw_circle(pos, 3.5 * camera_zoom, Color(0.95, 0.98, 1.0, 0.95))
+		draw_circle(pos, 6.0 * camera_zoom, Color(0.52, 0.94, 0.98, 0.85))
 
 
 func _draw_brush_preview(cx: int, cy: int, radius: int, hw: float, hh: float) -> void:
@@ -590,10 +714,9 @@ func _draw_brush_preview(cx: int, cy: int, radius: int, hw: float, hh: float) ->
 			if Vector2(cx, cy).distance_to(Vector2(nx, ny)) <= float(radius) + 0.35:
 				var t: Dictionary = state.get_tile(nx, ny)
 				var sc: Vector2 = grid_to_screen(float(nx), float(ny), maxf(0.0, float(t.get("elevation", 0.0))))
-				draw_polyline(PackedVector2Array([
-					sc + Vector2(0.0, -hh),
-					sc + Vector2(hw, 0.0),
-					sc + Vector2(0.0, hh),
-					sc + Vector2(-hw, 0.0),
-					sc + Vector2(0.0, -hh)
-				]), Color(0.38, 0.86, 0.98, 0.72), 1.8 * camera_zoom)
+				_poly_outline[0] = sc + Vector2(0.0, -hh)
+				_poly_outline[1] = sc + Vector2(hw, 0.0)
+				_poly_outline[2] = sc + Vector2(0.0, hh)
+				_poly_outline[3] = sc + Vector2(-hw, 0.0)
+				_poly_outline[4] = sc + Vector2(0.0, -hh)
+				draw_polyline(_poly_outline, Color(0.38, 0.86, 0.98, 0.72), 1.8 * camera_zoom)

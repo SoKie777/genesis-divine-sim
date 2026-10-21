@@ -43,7 +43,9 @@ func update_frame(delta: float) -> int:
 		return 0
 
 	_tick_accumulator += delta * base_ticks_per_second * speed_multiplier
-	var ticks_to_run: int = mini(int(floor(_tick_accumulator)), 120) # Plafond anti-spirale par frame
+	if _tick_accumulator > 24.0:
+		_tick_accumulator = 24.0 # Évite l'accumulation de retard en cas de saccade
+	var ticks_to_run: int = mini(int(floor(_tick_accumulator)), 16) # Plafond anti-spirale par frame
 	if ticks_to_run > 0:
 		_tick_accumulator -= float(ticks_to_run)
 		step_ticks(ticks_to_run)

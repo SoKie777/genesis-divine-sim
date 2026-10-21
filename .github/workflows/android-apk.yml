@@ -101,11 +101,12 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: "GENESIS — The Divine Simulation (v1.0.0 Android APK & PC)"
+          tag_name: v1.0.1
+          name: "GENESIS — The Divine Simulation (v1.0.1 - 60 FPS & Contrôles Tactiles Fluides)"
           body: |
-            ## ✦ GENESIS — The Divine Simulation (v1.0.0)
-            Simulateur de divinité systémique, émergent et multi-échelle (Godot 4).
-            - **Téléchargement Android :** Téléchargez et installez directement **`genesis-divine-sim.apk`** ci-dessous sur votre téléphone ou tablette Android.
-            - **Contrôles Tactiles Android :** Glissez à 1 doigt pour déplacer la carte (en mode *Observer*), pincez à 2 doigts pour zoomer, touchez une cité ou utilisez le dock divin inférieur pour façonner le monde.
+            ## ✦ GENESIS — The Divine Simulation (v1.0.1)
+            Mise à jour majeure de performances et d'ergonomie :
+            - **Fluidité 60 FPS** : Frustum Culling strict, textures Blender optimisées GPU, batching des frontières, throttling UI intelligent.
+            - **Déplacement libre & intuitif** : Glisser à 1 doigt en mode Observer, 2 doigts en tout temps, Clic Droit / Espace + Glisser sur PC, et nouveau pavé tactile directionnel en bas à gauche (`◀ ▲ ▼ ▶` + `🎯 Recentrer`).
+            - **Téléchargement Android** : Téléchargez et installez **`genesis-divine-sim.apk`** ci-dessous sur votre smartphone ou tablette.
           files: build/android/genesis-divine-sim.apk

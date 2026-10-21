@@ -24,7 +24,7 @@ Chaque `push` sur la branche `main` exécute automatiquement la suite de tests s
 
 | Action | Sur Android (Écran Tactile) | Sur PC (Souris & Clavier) |
 | :--- | :--- | :--- |
-| **Déplacer la caméra** | En mode `👁 Observer`, glisser à **1 doigt** (ou **2 doigts** à tout moment) | `Clic Droit + Glisser` ou touches `ZQSD` / `Flèches` |
+| **Déplacer la caméra** | Glisser à **1 doigt** (ou **2 doigts** à tout moment), ou utiliser le **pavé tactile directionnel** (`◀ ▲ ▼ ▶` + `🎯 Recentrer`) en bas à gauche | `Clic Droit + Glisser` ou `Espace + Glisser`, touches `ZQSD` / `Flèches`, ou pavé en bas à gauche |
 | **Zoomer / Dézoomer** | **Pincer à 2 doigts** (*Pinch-to-Zoom*) ou boutons `➕` / `➖` en haut | `Molette de la souris` ou boutons `➕` / `➖` |
 | **Inspecter une cité / terre** | En mode `👁 Observer`, **toucher** une cité ou une tuile | En mode `👁 Observer`, `Clic Gauche` sur une cité / tuile |
 | **Exercer un pouvoir divin** | Toucher une famille dans le **Dock du bas**, choisir un pouvoir, puis **toucher/glisser** sur la carte | Choisir un pouvoir dans le **Dock du bas**, puis `Clic Gauche` sur la carte |
